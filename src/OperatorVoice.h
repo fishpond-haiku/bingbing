@@ -10,23 +10,18 @@
 #include <ObjectList.h>
 #include <Point.h>
 #include <SupportDefs.h>
-#include <View.h>
-
-#include <memory>
-#include <vector>
+#include <String.h>
 
 #include "Voice.h"
 
+class Operator;
+class OperatorInput;
+class OperatorOutput;
+class OperatorVoice;
 class OperatorVoiceNote;
 
 struct OperatorValue {
-    enum Type {
-        FLOAT_VALUE,
-        EVENT_VALUE,
-        BOOL_VALUE,
-        SELECTOR_VALUE,
-        TIME_VALUE
-    } type;
+    enum Type { FLOAT_VALUE, EVENT_VALUE, BOOL_VALUE, SELECTOR_VALUE, TIME_VALUE } type;
     union {
         float floatValue;
         bool boolValue;
@@ -42,49 +37,81 @@ struct OperatorValue {
     static OperatorValue Time(uint64 value);
 };
 
-struct OperatorPort {
-    const char* name;
-    OperatorValue::Type type;
-};
-
 class OperatorState {
 public:
     virtual ~OperatorState() { }
 };
 
+typedef OperatorValue (*OperatorOutputFunction)(const Operator*, int32,
+    OperatorVoiceNote&, OperatorState&);
+
+class OperatorInput {
+public:
+    OperatorInput(const char* name, OperatorValue::Type type,
+        const OperatorValue& defaultValue, const char* const* selectorNames,
+        int32 selectorNameCount);
+
+    BString name;
+    OperatorValue::Type type;
+    OperatorValue defaultValue;
+    OperatorOutput* source;
+    const char* const* selectorNames;
+    int32 selectorNameCount;
+};
+
+class OperatorOutput {
+public:
+    OperatorOutput(Operator* owner, const char* name, OperatorValue::Type type,
+        OperatorOutputFunction function);
+
+    Operator* owner;
+    BString name;
+    OperatorValue::Type type;
+    OperatorOutputFunction function;
+    int32 cacheIndex;
+    BObjectList<OperatorInput, false> eventTargets;
+};
+
 class Operator : public BArchivable {
 public:
     virtual ~Operator();
-
     virtual const char* ClassName() const = 0;
-    virtual std::unique_ptr<OperatorState> CreateState() const = 0;
-    virtual OperatorValue EvaluateOutput(int32 output, OperatorVoiceNote& note,
-        OperatorState& state) const = 0;
-    virtual void ReceiveEvent(int32 input, OperatorVoiceNote& note,
-        OperatorState& state, uint64 frame);
+    virtual OperatorState* CreateState() const = 0;
+    virtual status_t Archive(BMessage* into, bool deep = true) const override;
+    static BArchivable* Instantiate(BMessage* archive);
 
-    int32 InputCount() const;
-    int32 OutputCount() const;
-    const OperatorPort& Input(int32 index) const;
-    const OperatorPort& Output(int32 index) const;
-    const OperatorValue& InputDefault(int32 index) const;
-    status_t SetInputDefault(int32 index, const OperatorValue& value);
+    int32 ID() const;
     BPoint Position() const;
     void SetPosition(BPoint position);
-
-    virtual status_t Archive(BMessage* into, bool deep = true) const override;
-    status_t Unarchive(const BMessage* archive);
+    int32 InputCount() const;
+    int32 OutputCount() const;
+    OperatorInput* InputAt(int32 index) const;
+    OperatorOutput* OutputAt(int32 index) const;
+    OperatorInput* FindInput(const char* name) const;
+    OperatorOutput* FindOutput(const char* name) const;
+    const char* const* SelectorNames(const char* inputName, int32* count) const;
+    status_t SetInputDefault(const char* name, const OperatorValue& value);
 
 protected:
-    Operator(const OperatorPort* inputs, int32 inputCount,
-        const OperatorPort* outputs, int32 outputCount);
+    Operator();
     explicit Operator(BMessage* archive);
+    status_t AddInput(const char* name, OperatorValue::Type type,
+        const OperatorValue& defaultValue, const char* const* selectorNames = NULL,
+        int32 selectorNameCount = 0);
+    status_t AddOutput(const char* name, OperatorValue::Type type,
+        OperatorOutputFunction function);
+    status_t Unarchive(const BMessage* archive);
+    virtual void ReceiveEvent(OperatorInput* input, OperatorVoiceNote& note,
+        OperatorState& state, uint64 frame);
 
 private:
-    std::vector<OperatorPort> fInputs;
-    std::vector<OperatorPort> fOutputs;
-    std::vector<OperatorValue> fDefaults;
+    friend class OperatorVoice;
+    friend class OperatorVoiceNote;
+    int32 fID;
+    int32 fGraphIndex;
     BPoint fPosition;
+    BObjectList<OperatorInput, true> fInputs;
+    BObjectList<OperatorOutput, true> fOutputs;
 };
 
 class NoteOperator : public Operator {
@@ -92,9 +119,7 @@ public:
     NoteOperator();
     explicit NoteOperator(BMessage* archive);
     virtual const char* ClassName() const override;
-    virtual std::unique_ptr<OperatorState> CreateState() const override;
-    virtual OperatorValue EvaluateOutput(int32 output, OperatorVoiceNote& note,
-        OperatorState& state) const override;
+    virtual OperatorState* CreateState() const override;
 };
 
 class SineOperator : public Operator {
@@ -102,9 +127,7 @@ public:
     SineOperator();
     explicit SineOperator(BMessage* archive);
     virtual const char* ClassName() const override;
-    virtual std::unique_ptr<OperatorState> CreateState() const override;
-    virtual OperatorValue EvaluateOutput(int32 output, OperatorVoiceNote& note,
-        OperatorState& state) const override;
+    virtual OperatorState* CreateState() const override;
 };
 
 class EnvelopeOperator : public Operator {
@@ -112,12 +135,11 @@ public:
     EnvelopeOperator();
     explicit EnvelopeOperator(BMessage* archive);
     virtual const char* ClassName() const override;
-    virtual std::unique_ptr<OperatorState> CreateState() const override;
-    virtual OperatorValue EvaluateOutput(int32 output, OperatorVoiceNote& note,
-        OperatorState& state) const override;
-    virtual void ReceiveEvent(int32 input, OperatorVoiceNote& note,
-        OperatorState& state, uint64 frame) override;
+    virtual OperatorState* CreateState() const override;
     bool IsFinished(const OperatorState& state) const;
+private:
+    virtual void ReceiveEvent(OperatorInput* input, OperatorVoiceNote& note,
+        OperatorState& state, uint64 frame) override;
 };
 
 class NoiseOperator : public Operator {
@@ -125,49 +147,41 @@ public:
     NoiseOperator();
     explicit NoiseOperator(BMessage* archive);
     virtual const char* ClassName() const override;
-    virtual std::unique_ptr<OperatorState> CreateState() const override;
-    virtual OperatorValue EvaluateOutput(int32 output, OperatorVoiceNote& note,
-        OperatorState& state) const override;
+    virtual OperatorState* CreateState() const override;
 };
+
+// Keep the spelling used in the original feature request available as an alias.
+typedef NoiseOperator NoiceOperator;
 
 class OperatorVoiceNote : public VoiceNote {
 public:
-    OperatorVoiceNote(class OperatorVoice* voice, uint8 note, float frequency,
+    OperatorVoiceNote(OperatorVoice* voice, uint8 note, float frequency,
         uint8 velocity, bigtime_t performanceTime);
     virtual float NextSample() override;
     virtual void NoteOff(bigtime_t performanceTime) override;
-
-    OperatorValue InputValue(const Operator* op, int32 input);
-    OperatorValue OutputValue(const Operator* op, int32 output);
+    OperatorValue InputValue(const Operator* op, const char* inputName);
+    OperatorValue Pull(OperatorOutput* output);
     uint64 Frame() const;
-    float SampleRate() const;
     float NoteFrequency() const;
     float NoteVelocity() const;
-    class OperatorVoice* Graph() const;
 
 private:
-    struct CachedOutput {
+    friend class Operator;
+    struct OutputCache {
         uint64 frame;
         bool evaluating;
         bool valid;
         OperatorValue value;
-        CachedOutput() : frame(0), evaluating(false), valid(false) { }
+        OutputCache() : frame(UINT64_MAX), evaluating(false), valid(false) { }
     };
-    class OperatorVoice* fGraph;
+    OperatorVoice* fGraph;
     uint64 fFrame;
-    std::vector<std::unique_ptr<OperatorState> > fStates;
-    std::vector<std::vector<CachedOutput> > fCache;
+    BObjectList<OperatorState, true> fStates;
+    BObjectList<OutputCache, true> fCache;
 };
 
 class OperatorVoice : public Voice {
 public:
-    struct Connection {
-        int32 sourceID;
-        int32 sourceOutput;
-        int32 targetID;
-        int32 targetInput;
-    };
-
     explicit OperatorVoice(float sampleRate);
     explicit OperatorVoice(BMessage* archive);
     virtual ~OperatorVoice();
@@ -175,21 +189,23 @@ public:
     virtual status_t Archive(BMessage* into, bool deep = true) const override;
     static BArchivable* Instantiate(BMessage* archive);
     virtual const char* Name() override;
+    virtual BView* CreateParamView() override;
 
     int32 AddOperator(Operator* op);
     Operator* OperatorAt(int32 index) const;
     int32 CountOperators() const;
     Operator* FindOperator(int32 id) const;
-    int32 IDForOperator(const Operator* op) const;
+    status_t Connect(int32 sourceID, const char* outputName,
+        int32 targetID, const char* inputName);
     status_t Connect(int32 sourceID, int32 sourceOutput,
         int32 targetID, int32 targetInput);
-    void Disconnect(int32 targetID, int32 targetInput);
+    void Disconnect(int32 targetID, const char* inputName);
     int32 NoteOperatorID() const;
-    status_t SetAudioOutput(int32 sourceID, int32 sourceOutput);
+    status_t SetAudioOutput(int32 sourceID, const char* outputName);
+    status_t SetAudioOutput(int32 sourceID, int32 outputIndex);
     void ClearAudioOutput();
     bool HasAudioOutput() const;
     bool HasEnvelopes() const;
-    const std::vector<Connection>& Connections() const;
 
 protected:
     virtual VoiceNote* createNote(uint8 note, float frequency, uint8 velocity,
@@ -197,25 +213,14 @@ protected:
 
 private:
     friend class OperatorVoiceNote;
-    int32 _IndexForID(int32 id) const;
-    OperatorValue _InputValue(OperatorVoiceNote& note, const Operator* op,
-        int32 input);
-    OperatorValue _OutputValue(OperatorVoiceNote& note, const Operator* op,
-        int32 output);
-    void _DispatchNoteOff(OperatorVoiceNote& note, uint64 frame);
     status_t _Unarchive(const BMessage* archive);
+    void _RefreshGraphIndices();
+    void _SendNoteOff(OperatorVoiceNote& note, uint64 frame);
 
-    struct Entry {
-        int32 id;
-        std::unique_ptr<Operator> op;
-        Entry(int32 operatorID, Operator* object) : id(operatorID), op(object) { }
-    };
-    std::vector<Entry> fOperators;
-    std::vector<Connection> fConnections;
+    BObjectList<Operator, true> fOperators;
     int32 fNextID;
     int32 fNoteOperatorID;
-    int32 fAudioSourceID;
-    int32 fAudioSourceOutput;
+    OperatorOutput* fAudioOutput;
     OperatorValue fAudioDefault;
 };
 

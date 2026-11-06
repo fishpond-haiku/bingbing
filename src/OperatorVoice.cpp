@@ -5,673 +5,565 @@
 #include "OperatorVoice.h"
 
 #include <math.h>
-#include <Message.h>
-#include <String.h>
-
 #include <new>
+#include <string.h>
 
 namespace {
 
-const OperatorPort kNoInputs[] = { };
-const OperatorPort kNoteOutputs[] = {
-    { "Frequency", OperatorValue::FLOAT_VALUE },
-    { "Velocity", OperatorValue::FLOAT_VALUE },
-    { "NoteOff", OperatorValue::EVENT_VALUE }
-};
-const OperatorPort kSineInputs[] = {
-    { "Frequency", OperatorValue::FLOAT_VALUE },
-    { "Amplitude", OperatorValue::FLOAT_VALUE }
-};
-const OperatorPort kSineOutputs[] = {
-    { "Sample", OperatorValue::FLOAT_VALUE }
-};
-const OperatorPort kEnvelopeInputs[] = {
-    { "Attack", OperatorValue::TIME_VALUE },
-    { "Decay", OperatorValue::TIME_VALUE },
-    { "Sustain", OperatorValue::FLOAT_VALUE },
-    { "Release", OperatorValue::TIME_VALUE },
-    { "NoteOff", OperatorValue::EVENT_VALUE }
-};
-const OperatorPort kEnvelopeOutputs[] = {
-    { "Amplitude", OperatorValue::FLOAT_VALUE }
-};
-const OperatorPort kNoiseOutputs[] = {
-    { "Sample", OperatorValue::FLOAT_VALUE }
-};
-
-struct BasicState : public OperatorState {
-    float phase;
-    BasicState() : phase(0.0f) { }
-};
-
+struct NoteState : public OperatorState { };
+struct SineState : public OperatorState { float phase; SineState() : phase(0.0f) { } };
 struct EnvelopeState : public OperatorState {
     uint64 releaseFrame;
     float releaseAmplitude;
     bool released;
     bool finished;
-    EnvelopeState()
-        : releaseFrame(0), releaseAmplitude(0.0f), released(false), finished(false) { }
+    EnvelopeState() : releaseFrame(0), releaseAmplitude(0.0f), released(false), finished(false) { }
 };
+struct NoiseState : public OperatorState { uint32 random; NoiseState() : random(0x9e3779b9) { } };
 
-struct NoiseState : public OperatorState {
-    uint32 random;
-    NoiseState() : random(0x9e3779b9) { }
-};
-
-uint64
-TimeToFrames(uint64 microseconds, float sampleRate)
+uint64 TimeToFrames(uint64 usec, float rate)
 {
-    if (microseconds == 0 || sampleRate <= 0.0f)
+    if (usec == 0 || rate <= 0.0f)
         return 0;
-    double frames = (double)microseconds * (double)sampleRate / 1000000.0;
+    double frames = (double)usec * rate / 1000000.0;
     return frames >= (double)UINT64_MAX ? UINT64_MAX : (uint64)frames;
 }
 
-Operator* CreateOperator(const char* type, BMessage* archive)
-{
-    if (strcmp(type, "NoteOperator") == 0)
-        return new(std::nothrow) NoteOperator(archive);
-    if (strcmp(type, "SineOperator") == 0)
-        return new(std::nothrow) SineOperator(archive);
-    if (strcmp(type, "EnvelopeOperator") == 0)
-        return new(std::nothrow) EnvelopeOperator(archive);
-    if (strcmp(type, "NoiseOperator") == 0)
-        return new(std::nothrow) NoiseOperator(archive);
-    return NULL;
-}
+OperatorValue NoteFrequency(const Operator*, int32, OperatorVoiceNote& note, OperatorState&)
+    { return OperatorValue::Float(note.NoteFrequency()); }
+OperatorValue NoteVelocity(const Operator*, int32, OperatorVoiceNote& note, OperatorState&)
+    { return OperatorValue::Float(note.NoteVelocity()); }
+OperatorValue NoteOffValue(const Operator*, int32, OperatorVoiceNote& note, OperatorState&)
+    { return OperatorValue::Event(note.Frame()); }
 
-} // namespace
-
-OperatorValue OperatorValue::Float(float value)
+OperatorValue SineSample(const Operator* op, int32, OperatorVoiceNote& note, OperatorState& base)
 {
-    OperatorValue result;
-    result.type = FLOAT_VALUE;
-    result.data.floatValue = value;
-    return result;
-}
-
-OperatorValue OperatorValue::Event(uint64 frame)
-{
-    OperatorValue result;
-    result.type = EVENT_VALUE;
-    result.data.timeValue = frame;
-    return result;
-}
-
-OperatorValue OperatorValue::Bool(bool value)
-{
-    OperatorValue result;
-    result.type = BOOL_VALUE;
-    result.data.boolValue = value;
-    return result;
-}
-
-OperatorValue OperatorValue::Selector(int32 value)
-{
-    OperatorValue result;
-    result.type = SELECTOR_VALUE;
-    result.data.selectorValue = value;
-    return result;
-}
-
-OperatorValue OperatorValue::Time(uint64 value)
-{
-    OperatorValue result;
-    result.type = TIME_VALUE;
-    result.data.timeValue = value;
-    return result;
-}
-
-Operator::Operator(const OperatorPort* inputs, int32 inputCount,
-    const OperatorPort* outputs, int32 outputCount)
-    :
-    BArchivable(),
-    fPosition(0.0f, 0.0f)
-{
-    for (int32 i = 0; i < inputCount; i++) {
-        fInputs.push_back(inputs[i]);
-        OperatorValue value;
-        value.type = inputs[i].type;
-        switch (value.type) {
-            case OperatorValue::FLOAT_VALUE: value.data.floatValue = 0.0f; break;
-            case OperatorValue::EVENT_VALUE: value.data.timeValue = 0; break;
-            case OperatorValue::BOOL_VALUE: value.data.boolValue = false; break;
-            case OperatorValue::SELECTOR_VALUE: value.data.selectorValue = 0; break;
-            case OperatorValue::TIME_VALUE: value.data.timeValue = 0; break;
-        }
-        fDefaults.push_back(value);
+    SineState& state = static_cast<SineState&>(base);
+    float frequency = note.InputValue(op, "Frequency").data.floatValue;
+    float amplitude = note.InputValue(op, "Amplitude").data.floatValue;
+    if (note.SampleRate() > 0.0f) {
+        state.phase += (float)(2.0 * M_PI) * frequency / note.SampleRate();
+        if (state.phase >= (float)(2.0 * M_PI))
+            state.phase = fmodf(state.phase, (float)(2.0 * M_PI));
     }
-    for (int32 i = 0; i < outputCount; i++)
-        fOutputs.push_back(outputs[i]);
+    return OperatorValue::Float(sinf(state.phase) * amplitude);
 }
 
-Operator::Operator(BMessage* archive)
-    :
-    BArchivable(archive),
-    fPosition(0.0f, 0.0f)
+OperatorValue EnvelopeAmplitude(const Operator* op, int32, OperatorVoiceNote& note,
+    OperatorState& base)
 {
-}
-
-Operator::~Operator()
-{
-}
-
-void Operator::ReceiveEvent(int32, OperatorVoiceNote&, OperatorState&, uint64)
-{
-}
-
-int32 Operator::InputCount() const { return (int32)fInputs.size(); }
-int32 Operator::OutputCount() const { return (int32)fOutputs.size(); }
-const OperatorPort& Operator::Input(int32 index) const { return fInputs[index]; }
-const OperatorPort& Operator::Output(int32 index) const { return fOutputs[index]; }
-const OperatorValue& Operator::InputDefault(int32 index) const { return fDefaults[index]; }
-BPoint Operator::Position() const { return fPosition; }
-void Operator::SetPosition(BPoint position) { fPosition = position; }
-
-status_t
-Operator::SetInputDefault(int32 index, const OperatorValue& value)
-{
-    if (index < 0 || index >= InputCount() || fInputs[index].type != value.type
-        || value.type == OperatorValue::EVENT_VALUE)
-        return B_BAD_VALUE;
-    fDefaults[index] = value;
-    return B_OK;
-}
-
-status_t
-Operator::Archive(BMessage* into, bool deep) const
-{
-    status_t status = BArchivable::Archive(into, deep);
-    if (status != B_OK)
-        return status;
-    status = into->AddString("operator:type", ClassName());
-    if (status == B_OK)
-        status = into->AddPoint("operator:position", fPosition);
-    for (int32 i = 0; status == B_OK && i < InputCount(); i++) {
-        if (fDefaults[i].type == OperatorValue::EVENT_VALUE)
-            continue;
-        BMessage value;
-        status = value.AddInt32("index", i);
-        if (status == B_OK)
-            status = value.AddInt32("type", fDefaults[i].type);
-        if (status != B_OK)
-            break;
-        switch (fDefaults[i].type) {
-            case OperatorValue::FLOAT_VALUE:
-                status = value.AddFloat("value", fDefaults[i].data.floatValue); break;
-            case OperatorValue::BOOL_VALUE:
-                status = value.AddBool("value", fDefaults[i].data.boolValue); break;
-            case OperatorValue::SELECTOR_VALUE:
-                status = value.AddInt32("value", fDefaults[i].data.selectorValue); break;
-            case OperatorValue::TIME_VALUE:
-                // Time values are persisted in microseconds, not frame counts.
-                status = value.AddUInt64("value", fDefaults[i].data.timeValue); break;
-            case OperatorValue::EVENT_VALUE:
-                break;
-        }
-        if (status == B_OK)
-            status = into->AddMessage("operator:input", &value);
-    }
-    return status;
-}
-
-status_t
-Operator::Unarchive(const BMessage* archive)
-{
-    archive->FindPoint("operator:position", &fPosition);
-    BMessage value;
-    for (int32 i = 0; archive->FindMessage("operator:input", i, &value) == B_OK; i++) {
-        int32 index;
-        int32 type;
-        if (value.FindInt32("index", &index) != B_OK
-            || value.FindInt32("type", &type) != B_OK
-            || index < 0 || index >= InputCount() || fInputs[index].type != type)
-            continue;
-        OperatorValue restored;
-        restored.type = fInputs[index].type;
-        status_t status = B_BAD_DATA;
-        switch (restored.type) {
-            case OperatorValue::FLOAT_VALUE:
-                status = value.FindFloat("value", &restored.data.floatValue); break;
-            case OperatorValue::BOOL_VALUE:
-                status = value.FindBool("value", &restored.data.boolValue); break;
-            case OperatorValue::SELECTOR_VALUE:
-                status = value.FindInt32("value", &restored.data.selectorValue); break;
-            case OperatorValue::TIME_VALUE:
-                status = value.FindUInt64("value", &restored.data.timeValue); break;
-            case OperatorValue::EVENT_VALUE:
-                break;
-        }
-        if (status == B_OK)
-            fDefaults[index] = restored;
-    }
-    return B_OK;
-}
-
-NoteOperator::NoteOperator()
-    : Operator(kNoInputs, 0, kNoteOutputs, 3) { }
-NoteOperator::NoteOperator(BMessage* archive)
-    : Operator(archive) { }
-const char* NoteOperator::ClassName() const { return "NoteOperator"; }
-std::unique_ptr<OperatorState> NoteOperator::CreateState() const
-    { return std::unique_ptr<OperatorState>(new OperatorState); }
-OperatorValue NoteOperator::EvaluateOutput(int32 output, OperatorVoiceNote& note,
-    OperatorState&) const
-{
-    if (output == 0) return OperatorValue::Float(note.NoteFrequency());
-    if (output == 1) return OperatorValue::Float(note.NoteVelocity());
-    if (output == 2) return OperatorValue::Event(note.Frame());
-    return OperatorValue::Float(0.0f);
-}
-
-SineOperator::SineOperator()
-    : Operator(kSineInputs, 2, kSineOutputs, 1)
-{
-    SetInputDefault(0, OperatorValue::Float(440.0f));
-    SetInputDefault(1, OperatorValue::Float(1.0f));
-}
-SineOperator::SineOperator(BMessage* archive) : Operator(archive) { }
-const char* SineOperator::ClassName() const { return "SineOperator"; }
-std::unique_ptr<OperatorState> SineOperator::CreateState() const
-    { return std::unique_ptr<OperatorState>(new BasicState); }
-OperatorValue SineOperator::EvaluateOutput(int32 output, OperatorVoiceNote& note,
-    OperatorState& baseState) const
-{
-    if (output != 0) return OperatorValue::Float(0.0f);
-    BasicState& state = static_cast<BasicState&>(baseState);
-    OperatorValue frequency = note.InputValue(this, 0);
-    OperatorValue amplitude = note.InputValue(this, 1);
-    state.phase += (float)(2.0 * M_PI) * frequency.data.floatValue / note.SampleRate();
-    if (state.phase >= (float)(2.0 * M_PI))
-        state.phase = fmodf(state.phase, (float)(2.0 * M_PI));
-    return OperatorValue::Float(sinf(state.phase) * amplitude.data.floatValue);
-}
-
-EnvelopeOperator::EnvelopeOperator()
-    : Operator(kEnvelopeInputs, 5, kEnvelopeOutputs, 1)
-{
-    SetInputDefault(0, OperatorValue::Time(0));
-    SetInputDefault(1, OperatorValue::Time(500000));
-    SetInputDefault(2, OperatorValue::Float(1.0f));
-    SetInputDefault(3, OperatorValue::Time(100000));
-}
-EnvelopeOperator::EnvelopeOperator(BMessage* archive) : Operator(archive) { }
-const char* EnvelopeOperator::ClassName() const { return "EnvelopeOperator"; }
-std::unique_ptr<OperatorState> EnvelopeOperator::CreateState() const
-    { return std::unique_ptr<OperatorState>(new EnvelopeState); }
-void EnvelopeOperator::ReceiveEvent(int32 input, OperatorVoiceNote& note,
-    OperatorState& baseState, uint64 frame)
-{
-    if (input != 4)
-        return;
-    EnvelopeState& state = static_cast<EnvelopeState&>(baseState);
-    if (!state.released) {
-        state.releaseAmplitude = EvaluateOutput(0, note, baseState).data.floatValue;
-        state.releaseFrame = frame;
-        state.released = true;
-    }
-}
-OperatorValue EnvelopeOperator::EvaluateOutput(int32 output, OperatorVoiceNote& note,
-    OperatorState& baseState) const
-{
-    if (output != 0) return OperatorValue::Float(0.0f);
-    EnvelopeState& state = static_cast<EnvelopeState&>(baseState);
-    if (state.finished) return OperatorValue::Float(0.0f);
-
+    EnvelopeState& state = static_cast<EnvelopeState&>(base);
+    if (state.finished)
+        return OperatorValue::Float(0.0f);
+    uint64 attack = TimeToFrames(note.InputValue(op, "Attack").data.timeValue, note.SampleRate());
+    uint64 decay = TimeToFrames(note.InputValue(op, "Decay").data.timeValue, note.SampleRate());
+    uint64 release = TimeToFrames(note.InputValue(op, "Release").data.timeValue, note.SampleRate());
+    float sustain = note.InputValue(op, "Sustain").data.floatValue;
     uint64 frame = note.Frame();
-    uint64 attack = TimeToFrames(note.InputValue(this, 0).data.timeValue, note.SampleRate());
-    uint64 decay = TimeToFrames(note.InputValue(this, 1).data.timeValue, note.SampleRate());
-    float sustain = note.InputValue(this, 2).data.floatValue;
-    uint64 release = TimeToFrames(note.InputValue(this, 3).data.timeValue, note.SampleRate());
-
-    float amplitude;
     if (state.released) {
         uint64 elapsed = frame >= state.releaseFrame ? frame - state.releaseFrame : 0;
         if (release == 0 || elapsed >= release) {
             state.finished = true;
             return OperatorValue::Float(0.0f);
         }
-        amplitude = state.releaseAmplitude * (1.0f - (float)elapsed / (float)release);
-    } else if (attack > 0 && frame < attack) {
-        amplitude = (float)frame / (float)attack;
-    } else if (decay > 0 && frame < attack + decay) {
-        float progress = (float)(frame - attack) / (float)decay;
-        amplitude = 1.0f + (sustain - 1.0f) * progress;
-    } else {
-        amplitude = sustain;
+        return OperatorValue::Float(state.releaseAmplitude
+            * (1.0f - (float)elapsed / (float)release));
     }
-    return OperatorValue::Float(amplitude);
+    if (attack > 0 && frame < attack)
+        return OperatorValue::Float((float)frame / (float)attack);
+    if (decay > 0 && frame - (frame >= attack ? attack : frame) < decay
+        && frame >= attack) {
+        float progress = (float)(frame - attack) / (float)decay;
+        return OperatorValue::Float(1.0f + (sustain - 1.0f) * progress);
+    }
+    return OperatorValue::Float(sustain);
 }
-bool EnvelopeOperator::IsFinished(const OperatorState& state) const
-    { return static_cast<const EnvelopeState&>(state).finished; }
 
-NoiseOperator::NoiseOperator()
-    : Operator(kNoInputs, 0, kNoiseOutputs, 1) { }
-NoiseOperator::NoiseOperator(BMessage* archive) : Operator(archive) { }
-const char* NoiseOperator::ClassName() const { return "NoiseOperator"; }
-std::unique_ptr<OperatorState> NoiseOperator::CreateState() const
-    { return std::unique_ptr<OperatorState>(new NoiseState); }
-OperatorValue NoiseOperator::EvaluateOutput(int32 output, OperatorVoiceNote&,
-    OperatorState& baseState) const
+OperatorValue NoiseSample(const Operator*, int32, OperatorVoiceNote&, OperatorState& base)
 {
-    if (output != 0) return OperatorValue::Float(0.0f);
-    NoiseState& state = static_cast<NoiseState&>(baseState);
+    NoiseState& state = static_cast<NoiseState&>(base);
     state.random ^= state.random << 13;
     state.random ^= state.random >> 17;
     state.random ^= state.random << 5;
-    return OperatorValue::Float((float)((int32)state.random) / 2147483648.0f);
+    return OperatorValue::Float((float)(int32)state.random / 2147483648.0f);
 }
 
-OperatorVoice::OperatorVoice(float sampleRate)
-    :
-    Voice(sampleRate),
-    fNextID(1),
-    fNoteOperatorID(-1),
-    fAudioSourceID(-1),
-    fAudioSourceOutput(-1),
-    fAudioDefault(OperatorValue::Float(0.0f))
+Operator* InstantiateOperator(const char* type, BMessage* archive)
 {
-    fNoteOperatorID = AddOperator(new(std::nothrow) NoteOperator);
+    if (strcmp(type, "NoteOperator") == 0) return new(std::nothrow) NoteOperator(archive);
+    if (strcmp(type, "SineOperator") == 0) return new(std::nothrow) SineOperator(archive);
+    if (strcmp(type, "EnvelopeOperator") == 0) return new(std::nothrow) EnvelopeOperator(archive);
+    if (strcmp(type, "NoiseOperator") == 0) return new(std::nothrow) NoiseOperator(archive);
+    return NULL;
 }
 
-OperatorVoice::OperatorVoice(BMessage* archive)
-    :
-    Voice(archive),
-    fNextID(1),
-    fNoteOperatorID(-1),
-    fAudioSourceID(-1),
-    fAudioSourceOutput(-1),
-    fAudioDefault(OperatorValue::Float(0.0f))
+} // namespace
+
+OperatorValue OperatorValue::Float(float value)
+    { OperatorValue result; result.type = FLOAT_VALUE; result.data.floatValue = value; return result; }
+OperatorValue OperatorValue::Event(uint64 frame)
+    { OperatorValue result; result.type = EVENT_VALUE; result.data.timeValue = frame; return result; }
+OperatorValue OperatorValue::Bool(bool value)
+    { OperatorValue result; result.type = BOOL_VALUE; result.data.boolValue = value; return result; }
+OperatorValue OperatorValue::Selector(int32 value)
+    { OperatorValue result; result.type = SELECTOR_VALUE; result.data.selectorValue = value; return result; }
+OperatorValue OperatorValue::Time(uint64 value)
+    { OperatorValue result; result.type = TIME_VALUE; result.data.timeValue = value; return result; }
+
+OperatorInput::OperatorInput(const char* inputName, OperatorValue::Type inputType,
+    const OperatorValue& value, const char* const* names, int32 count)
+    : name(inputName), type(inputType), defaultValue(value), source(NULL),
+      selectorNames(names), selectorNameCount(count) { }
+
+OperatorOutput::OperatorOutput(Operator* operatorOwner, const char* outputName,
+    OperatorValue::Type outputType, OperatorOutputFunction outputFunction)
+    : owner(operatorOwner), name(outputName), type(outputType),
+      function(outputFunction), cacheIndex(-1), eventTargets() { }
+
+Operator::Operator()
+    : BArchivable(), fID(-1), fGraphIndex(-1), fPosition(0.0f, 0.0f), fInputs(), fOutputs() { }
+Operator::Operator(BMessage* archive)
+    : BArchivable(archive), fID(-1), fGraphIndex(-1), fPosition(0.0f, 0.0f), fInputs(), fOutputs() { }
+Operator::~Operator() { }
+int32 Operator::ID() const { return fID; }
+BPoint Operator::Position() const { return fPosition; }
+void Operator::SetPosition(BPoint position) { fPosition = position; }
+int32 Operator::InputCount() const { return fInputs.CountItems(); }
+int32 Operator::OutputCount() const { return fOutputs.CountItems(); }
+OperatorInput* Operator::InputAt(int32 index) const { return fInputs.ItemAt(index); }
+OperatorOutput* Operator::OutputAt(int32 index) const { return fOutputs.ItemAt(index); }
+
+OperatorInput* Operator::FindInput(const char* name) const
 {
-    _Unarchive(archive);
+    if (name == NULL) return NULL;
+    for (int32 i = 0; i < InputCount(); i++)
+        if (fInputs.ItemAt(i)->name == name) return fInputs.ItemAt(i);
+    return NULL;
+}
+OperatorOutput* Operator::FindOutput(const char* name) const
+{
+    if (name == NULL) return NULL;
+    for (int32 i = 0; i < OutputCount(); i++)
+        if (fOutputs.ItemAt(i)->name == name) return fOutputs.ItemAt(i);
+    return NULL;
+}
+const char* const* Operator::SelectorNames(const char* inputName, int32* count) const
+{
+    OperatorInput* input = FindInput(inputName);
+    if (count != NULL) *count = input != NULL ? input->selectorNameCount : 0;
+    return input != NULL ? input->selectorNames : NULL;
 }
 
-OperatorVoice::~OperatorVoice() { }
-const char* OperatorVoice::Name() { return "Operator Voice"; }
-
-int32
-OperatorVoice::AddOperator(Operator* op)
+status_t Operator::AddInput(const char* name, OperatorValue::Type type,
+    const OperatorValue& value, const char* const* selectorNames, int32 count)
 {
-    if (op == NULL)
-        return -1;
-    if (dynamic_cast<NoteOperator*>(op) != NULL && fNoteOperatorID >= 0) {
-        delete op;
-        return -1;
-    }
-    int32 id = fNextID++;
-    fOperators.push_back(Entry(id, op));
-    if (dynamic_cast<NoteOperator*>(op) != NULL)
-        fNoteOperatorID = id;
-    return id;
-}
-
-Operator* OperatorVoice::OperatorAt(int32 index) const
-    { return index < 0 || index >= CountOperators() ? NULL : fOperators[index].op.get(); }
-int32 OperatorVoice::CountOperators() const { return (int32)fOperators.size(); }
-int32 OperatorVoice::_IndexForID(int32 id) const
-{
-    for (int32 i = 0; i < CountOperators(); i++)
-        if (fOperators[i].id == id) return i;
-    return -1;
-}
-Operator* OperatorVoice::FindOperator(int32 id) const
-    { int32 index = _IndexForID(id); return index < 0 ? NULL : fOperators[index].op.get(); }
-int32 OperatorVoice::IDForOperator(const Operator* op) const
-{
-    for (int32 i = 0; i < CountOperators(); i++)
-        if (fOperators[i].op.get() == op) return fOperators[i].id;
-    return -1;
-}
-
-status_t
-OperatorVoice::Connect(int32 sourceID, int32 sourceOutput, int32 targetID, int32 targetInput)
-{
-    Operator* source = FindOperator(sourceID);
-    Operator* target = FindOperator(targetID);
-    if (source == NULL || target == NULL || sourceOutput < 0
-        || sourceOutput >= source->OutputCount() || targetInput < 0
-        || targetInput >= target->InputCount()
-        || source->Output(sourceOutput).type != target->Input(targetInput).type
-        || source->Output(sourceOutput).type == OperatorValue::EVENT_VALUE)
+    if (name == NULL || FindInput(name) != NULL || value.type != type)
         return B_BAD_VALUE;
-    Disconnect(targetID, targetInput);
-    fConnections.push_back({ sourceID, sourceOutput, targetID, targetInput });
+    OperatorInput* input = new(std::nothrow) OperatorInput(name, type, value, selectorNames, count);
+    if (input == NULL || !fInputs.AddItem(input)) { delete input; return B_NO_MEMORY; }
+    return B_OK;
+}
+status_t Operator::AddOutput(const char* name, OperatorValue::Type type,
+    OperatorOutputFunction function)
+{
+    if (name == NULL || FindOutput(name) != NULL || function == NULL)
+        return B_BAD_VALUE;
+    OperatorOutput* output = new(std::nothrow) OperatorOutput(this, name, type, function);
+    if (output == NULL || !fOutputs.AddItem(output)) { delete output; return B_NO_MEMORY; }
+    return B_OK;
+}
+status_t Operator::SetInputDefault(const char* name, const OperatorValue& value)
+{
+    OperatorInput* input = FindInput(name);
+    if (input == NULL || input->type != value.type || value.type == OperatorValue::EVENT_VALUE)
+        return B_BAD_VALUE;
+    input->defaultValue = value;
     return B_OK;
 }
 
-void OperatorVoice::Disconnect(int32 targetID, int32 targetInput)
+status_t Operator::Archive(BMessage* into, bool deep) const
 {
-    for (std::vector<Connection>::iterator it = fConnections.begin(); it != fConnections.end();) {
-        if (it->targetID == targetID && it->targetInput == targetInput)
-            it = fConnections.erase(it);
-        else
-            ++it;
-    }
-}
-
-int32 OperatorVoice::NoteOperatorID() const { return fNoteOperatorID; }
-status_t OperatorVoice::SetAudioOutput(int32 sourceID, int32 sourceOutput)
-{
-    Operator* source = FindOperator(sourceID);
-    if (source == NULL || sourceOutput < 0 || sourceOutput >= source->OutputCount()
-        || source->Output(sourceOutput).type != OperatorValue::FLOAT_VALUE)
-        return B_BAD_VALUE;
-    fAudioSourceID = sourceID;
-    fAudioSourceOutput = sourceOutput;
-    return B_OK;
-}
-void OperatorVoice::ClearAudioOutput() { fAudioSourceID = fAudioSourceOutput = -1; }
-bool OperatorVoice::HasAudioOutput() const { return FindOperator(fAudioSourceID) != NULL; }
-bool OperatorVoice::HasEnvelopes() const
-{
-    for (int32 i = 0; i < CountOperators(); i++)
-        if (dynamic_cast<EnvelopeOperator*>(fOperators[i].op.get()) != NULL) return true;
-    return false;
-}
-const std::vector<OperatorVoice::Connection>& OperatorVoice::Connections() const
-    { return fConnections; }
-
-VoiceNote*
-OperatorVoice::createNote(uint8 note, float frequency, uint8 velocity,
-    bigtime_t performanceTime)
-{
-    return new(std::nothrow) OperatorVoiceNote(this, note, frequency, velocity, performanceTime);
-}
-
-status_t
-OperatorVoice::Archive(BMessage* into, bool deep) const
-{
-    status_t status = Voice::Archive(into, deep);
-    if (status != B_OK) return status;
-    status = into->AddInt32("operatorVoice:next_id", fNextID);
-    if (status == B_OK) status = into->AddInt32("operatorVoice:note_id", fNoteOperatorID);
-    if (status == B_OK) status = into->AddInt32("operatorVoice:audio_source", fAudioSourceID);
-    if (status == B_OK) status = into->AddInt32("operatorVoice:audio_output", fAudioSourceOutput);
-    if (status == B_OK) status = into->AddFloat("operatorVoice:audio_default", fAudioDefault.data.floatValue);
-    for (int32 i = 0; status == B_OK && i < CountOperators(); i++) {
-        BMessage opArchive;
-        status = fOperators[i].op->Archive(&opArchive, deep);
-        if (status == B_OK) status = opArchive.AddInt32("operatorVoice:id", fOperators[i].id);
-        if (status == B_OK) status = into->AddMessage("operatorVoice:operator", &opArchive);
-    }
-    for (size_t i = 0; status == B_OK && i < fConnections.size(); i++) {
-        BMessage connection;
-        status = connection.AddInt32("source", fConnections[i].sourceID);
-        if (status == B_OK) status = connection.AddInt32("output", fConnections[i].sourceOutput);
-        if (status == B_OK) status = connection.AddInt32("target", fConnections[i].targetID);
-        if (status == B_OK) status = connection.AddInt32("input", fConnections[i].targetInput);
-        if (status == B_OK) status = into->AddMessage("operatorVoice:connection", &connection);
+    status_t status = BArchivable::Archive(into, deep);
+    if (status == B_OK) status = into->AddString("operator:type", ClassName());
+    if (status == B_OK) status = into->AddInt32("operator:id", fID);
+    if (status == B_OK) status = into->AddPoint("operator:position", fPosition);
+    for (int32 i = 0; status == B_OK && i < InputCount(); i++) {
+        const OperatorInput* input = fInputs.ItemAt(i);
+        if (input->type == OperatorValue::EVENT_VALUE) continue;
+        BMessage value;
+        status = value.AddString("name", input->name);
+        if (status == B_OK) status = value.AddInt32("type", input->type);
+        if (status == B_OK) {
+            switch (input->type) {
+                case OperatorValue::FLOAT_VALUE: status = value.AddFloat("value", input->defaultValue.data.floatValue); break;
+                case OperatorValue::BOOL_VALUE: status = value.AddBool("value", input->defaultValue.data.boolValue); break;
+                case OperatorValue::SELECTOR_VALUE: status = value.AddInt32("value", input->defaultValue.data.selectorValue); break;
+                case OperatorValue::TIME_VALUE: status = value.AddUInt64("value_usec", input->defaultValue.data.timeValue); break;
+                case OperatorValue::EVENT_VALUE: break;
+            }
+        }
+        if (status == B_OK) status = into->AddMessage("operator:input", &value);
     }
     return status;
 }
 
-status_t
-OperatorVoice::_Unarchive(const BMessage* archive)
+status_t Operator::Unarchive(const BMessage* archive)
 {
-    archive->FindInt32("operatorVoice:next_id", &fNextID);
-    archive->FindInt32("operatorVoice:note_id", &fNoteOperatorID);
-    archive->FindInt32("operatorVoice:audio_source", &fAudioSourceID);
-    archive->FindInt32("operatorVoice:audio_output", &fAudioSourceOutput);
-    archive->FindFloat("operatorVoice:audio_default", &fAudioDefault.data.floatValue);
-    BMessage opArchive;
-    for (int32 i = 0; archive->FindMessage("operatorVoice:operator", i, &opArchive) == B_OK; i++) {
-        const char* type;
-        int32 id;
-        if (opArchive.FindString("operator:type", &type) != B_OK
-            || opArchive.FindInt32("operatorVoice:id", &id) != B_OK)
+    archive->FindPoint("operator:position", &fPosition);
+    archive->FindInt32("operator:id", &fID);
+    BMessage message;
+    for (int32 i = 0; archive->FindMessage("operator:input", i, &message) == B_OK; i++) {
+        const char* name;
+        int32 type;
+        if (message.FindString("name", &name) != B_OK || message.FindInt32("type", &type) != B_OK)
             continue;
-        Operator* op = CreateOperator(type, &opArchive);
-        if (op == NULL)
+        OperatorInput* input = FindInput(name);
+        if (input == NULL || input->type != type || input->type == OperatorValue::EVENT_VALUE)
             continue;
-        op->Unarchive(&opArchive);
-        fOperators.push_back(Entry(id, op));
-        if (id >= fNextID) fNextID = id + 1;
-    }
-    if (FindOperator(fNoteOperatorID) == NULL) {
-        fNoteOperatorID = -1;
-        for (int32 i = 0; i < CountOperators(); i++) {
-            if (dynamic_cast<NoteOperator*>(fOperators[i].op.get()) != NULL) {
-                fNoteOperatorID = fOperators[i].id;
-                break;
-            }
+        OperatorValue value = input->defaultValue;
+        status_t status = B_BAD_DATA;
+        switch (input->type) {
+            case OperatorValue::FLOAT_VALUE: status = message.FindFloat("value", &value.data.floatValue); break;
+            case OperatorValue::BOOL_VALUE: status = message.FindBool("value", &value.data.boolValue); break;
+            case OperatorValue::SELECTOR_VALUE: status = message.FindInt32("value", &value.data.selectorValue); break;
+            case OperatorValue::TIME_VALUE: status = message.FindUInt64("value_usec", &value.data.timeValue); break;
+            case OperatorValue::EVENT_VALUE: break;
         }
-        if (fNoteOperatorID < 0)
-            fNoteOperatorID = AddOperator(new(std::nothrow) NoteOperator);
-    }
-
-    BMessage connection;
-    for (int32 i = 0; archive->FindMessage("operatorVoice:connection", i, &connection) == B_OK; i++) {
-        Connection item;
-        if (connection.FindInt32("source", &item.sourceID) != B_OK
-            || connection.FindInt32("output", &item.sourceOutput) != B_OK
-            || connection.FindInt32("target", &item.targetID) != B_OK
-            || connection.FindInt32("input", &item.targetInput) != B_OK)
-            continue;
-        Connect(item.sourceID, item.sourceOutput, item.targetID, item.targetInput);
+        if (status == B_OK) input->defaultValue = value;
     }
     return B_OK;
 }
 
-BArchivable*
-OperatorVoice::Instantiate(BMessage* archive)
+void Operator::ReceiveEvent(OperatorInput*, OperatorVoiceNote&, OperatorState&, uint64) { }
+BArchivable* Operator::Instantiate(BMessage* archive)
 {
-    if (!validate_instantiation(archive, "OperatorVoice"))
-        return NULL;
-    return new(std::nothrow) OperatorVoice(archive);
+    if (archive == NULL) return NULL;
+    const char* type;
+    if (archive->FindString("operator:type", &type) != B_OK) return NULL;
+    return InstantiateOperator(type, archive);
 }
 
-OperatorValue
-OperatorVoice::_InputValue(OperatorVoiceNote& note, const Operator* op, int32 input)
+NoteOperator::NoteOperator() : Operator()
 {
-    int32 targetID = IDForOperator(op);
-    for (size_t i = 0; i < fConnections.size(); i++) {
-        const Connection& connection = fConnections[i];
-        if (connection.targetID == targetID && connection.targetInput == input) {
-            Operator* source = FindOperator(connection.sourceID);
-            if (source != NULL) return note.OutputValue(source, connection.sourceOutput);
+    AddOutput("Frequency", OperatorValue::FLOAT_VALUE, NoteFrequency);
+    AddOutput("Velocity", OperatorValue::FLOAT_VALUE, NoteVelocity);
+    AddOutput("NoteOff", OperatorValue::EVENT_VALUE, NoteOffValue);
+}
+NoteOperator::NoteOperator(BMessage* archive) : Operator(archive)
+    { AddOutput("Frequency", OperatorValue::FLOAT_VALUE, NoteFrequency); AddOutput("Velocity", OperatorValue::FLOAT_VALUE, NoteVelocity); AddOutput("NoteOff", OperatorValue::EVENT_VALUE, NoteOffValue); Unarchive(archive); }
+const char* NoteOperator::ClassName() const { return "NoteOperator"; }
+OperatorState* NoteOperator::CreateState() const { return new(std::nothrow) NoteState; }
+
+SineOperator::SineOperator() : Operator()
+{
+    AddInput("Frequency", OperatorValue::FLOAT_VALUE, OperatorValue::Float(440.0f));
+    AddInput("Amplitude", OperatorValue::FLOAT_VALUE, OperatorValue::Float(1.0f));
+    AddOutput("Sample", OperatorValue::FLOAT_VALUE, SineSample);
+}
+SineOperator::SineOperator(BMessage* archive) : Operator(archive)
+{
+    AddInput("Frequency", OperatorValue::FLOAT_VALUE, OperatorValue::Float(440.0f));
+    AddInput("Amplitude", OperatorValue::FLOAT_VALUE, OperatorValue::Float(1.0f));
+    AddOutput("Sample", OperatorValue::FLOAT_VALUE, SineSample);
+    Unarchive(archive);
+}
+const char* SineOperator::ClassName() const { return "SineOperator"; }
+OperatorState* SineOperator::CreateState() const { return new(std::nothrow) SineState; }
+
+EnvelopeOperator::EnvelopeOperator() : Operator()
+{
+    AddInput("Attack", OperatorValue::TIME_VALUE, OperatorValue::Time(0));
+    AddInput("Decay", OperatorValue::TIME_VALUE, OperatorValue::Time(500000));
+    AddInput("Sustain", OperatorValue::FLOAT_VALUE, OperatorValue::Float(1.0f));
+    AddInput("Release", OperatorValue::TIME_VALUE, OperatorValue::Time(100000));
+    AddInput("NoteOff", OperatorValue::EVENT_VALUE, OperatorValue::Event());
+    AddOutput("Amplitude", OperatorValue::FLOAT_VALUE, EnvelopeAmplitude);
+}
+EnvelopeOperator::EnvelopeOperator(BMessage* archive) : Operator(archive)
+{
+    AddInput("Attack", OperatorValue::TIME_VALUE, OperatorValue::Time(0));
+    AddInput("Decay", OperatorValue::TIME_VALUE, OperatorValue::Time(500000));
+    AddInput("Sustain", OperatorValue::FLOAT_VALUE, OperatorValue::Float(1.0f));
+    AddInput("Release", OperatorValue::TIME_VALUE, OperatorValue::Time(100000));
+    AddInput("NoteOff", OperatorValue::EVENT_VALUE, OperatorValue::Event());
+    AddOutput("Amplitude", OperatorValue::FLOAT_VALUE, EnvelopeAmplitude);
+    Unarchive(archive);
+}
+const char* EnvelopeOperator::ClassName() const { return "EnvelopeOperator"; }
+OperatorState* EnvelopeOperator::CreateState() const { return new(std::nothrow) EnvelopeState; }
+bool EnvelopeOperator::IsFinished(const OperatorState& state) const
+    { return static_cast<const EnvelopeState&>(state).finished; }
+void EnvelopeOperator::ReceiveEvent(OperatorInput* input, OperatorVoiceNote& note,
+    OperatorState& base, uint64 frame)
+{
+    if (input == NULL || input->name != "NoteOff") return;
+    EnvelopeState& state = static_cast<EnvelopeState&>(base);
+    if (!state.released) {
+        state.releaseAmplitude = note.Pull(FindOutput("Amplitude")).data.floatValue;
+        state.releaseFrame = frame;
+        state.released = true;
+    }
+}
+
+NoiseOperator::NoiseOperator() : Operator()
+    { AddOutput("Sample", OperatorValue::FLOAT_VALUE, NoiseSample); }
+NoiseOperator::NoiseOperator(BMessage* archive) : Operator(archive)
+    { AddOutput("Sample", OperatorValue::FLOAT_VALUE, NoiseSample); Unarchive(archive); }
+const char* NoiseOperator::ClassName() const { return "NoiseOperator"; }
+OperatorState* NoiseOperator::CreateState() const { return new(std::nothrow) NoiseState; }
+
+OperatorVoice::OperatorVoice(float sampleRate)
+    : Voice(sampleRate), fOperators(), fNextID(1), fNoteOperatorID(-1),
+      fAudioOutput(NULL), fAudioDefault(OperatorValue::Float(0.0f))
+    { fNoteOperatorID = AddOperator(new(std::nothrow) NoteOperator); }
+OperatorVoice::OperatorVoice(BMessage* archive)
+    : Voice(archive), fOperators(), fNextID(1), fNoteOperatorID(-1),
+      fAudioOutput(NULL), fAudioDefault(OperatorValue::Float(0.0f))
+    { _Unarchive(archive); }
+OperatorVoice::~OperatorVoice() { }
+const char* OperatorVoice::Name() { return "Operator Voice"; }
+BView* OperatorVoice::CreateParamView() { return Voice::CreateParamView(); }
+
+int32 OperatorVoice::AddOperator(Operator* op)
+{
+    if (op == NULL || fVoiceNotes.CountItems() != 0) { delete op; return -1; }
+    if (dynamic_cast<NoteOperator*>(op) != NULL && fNoteOperatorID >= 0) { delete op; return -1; }
+    op->fID = fNextID++;
+    if (!fOperators.AddItem(op)) { delete op; return -1; }
+    if (dynamic_cast<NoteOperator*>(op) != NULL) fNoteOperatorID = op->fID;
+    _RefreshGraphIndices();
+    return op->fID;
+}
+Operator* OperatorVoice::OperatorAt(int32 index) const { return fOperators.ItemAt(index); }
+int32 OperatorVoice::CountOperators() const { return fOperators.CountItems(); }
+Operator* OperatorVoice::FindOperator(int32 id) const
+{
+    for (int32 i = 0; i < CountOperators(); i++)
+        if (fOperators.ItemAt(i)->ID() == id) return fOperators.ItemAt(i);
+    return NULL;
+}
+void OperatorVoice::_RefreshGraphIndices()
+{
+    int32 cacheIndex = 0;
+    for (int32 i = 0; i < CountOperators(); i++) {
+        Operator* op = OperatorAt(i);
+        op->fGraphIndex = i;
+        for (int32 j = 0; j < op->OutputCount(); j++)
+            op->OutputAt(j)->cacheIndex = cacheIndex++;
+    }
+}
+
+status_t OperatorVoice::Connect(int32 sourceID, const char* outputName,
+    int32 targetID, const char* inputName)
+{
+    Operator* source = FindOperator(sourceID);
+    Operator* target = FindOperator(targetID);
+    if (source == NULL || target == NULL) return B_BAD_VALUE;
+    OperatorOutput* output = source->FindOutput(outputName);
+    OperatorInput* input = target->FindInput(inputName);
+    if (output == NULL || input == NULL || output->type != input->type) return B_BAD_VALUE;
+    Disconnect(targetID, inputName);
+    input->source = output;
+    if (input->type == OperatorValue::EVENT_VALUE)
+        output->eventTargets.AddItem(input);
+    return B_OK;
+}
+status_t OperatorVoice::Connect(int32 sourceID, int32 sourceOutput,
+    int32 targetID, int32 targetInput)
+{
+    Operator* source = FindOperator(sourceID); Operator* target = FindOperator(targetID);
+    if (source == NULL || target == NULL || sourceOutput < 0 || sourceOutput >= source->OutputCount()
+        || targetInput < 0 || targetInput >= target->InputCount()) return B_BAD_VALUE;
+    return Connect(sourceID, source->OutputAt(sourceOutput)->name,
+        targetID, target->InputAt(targetInput)->name);
+}
+void OperatorVoice::Disconnect(int32 targetID, const char* inputName)
+{
+    Operator* target = FindOperator(targetID);
+    if (target == NULL) return;
+    OperatorInput* input = target->FindInput(inputName);
+    if (input == NULL || input->source == NULL) return;
+    if (input->type == OperatorValue::EVENT_VALUE)
+        input->source->eventTargets.RemoveItem(input);
+    input->source = NULL;
+}
+int32 OperatorVoice::NoteOperatorID() const { return fNoteOperatorID; }
+status_t OperatorVoice::SetAudioOutput(int32 sourceID, const char* outputName)
+{
+    Operator* source = FindOperator(sourceID);
+    OperatorOutput* output = source != NULL ? source->FindOutput(outputName) : NULL;
+    if (output == NULL || output->type != OperatorValue::FLOAT_VALUE) return B_BAD_VALUE;
+    fAudioOutput = output;
+    return B_OK;
+}
+status_t OperatorVoice::SetAudioOutput(int32 sourceID, int32 outputIndex)
+{
+    Operator* source = FindOperator(sourceID);
+    if (source == NULL || outputIndex < 0 || outputIndex >= source->OutputCount()) return B_BAD_VALUE;
+    return SetAudioOutput(sourceID, source->OutputAt(outputIndex)->name);
+}
+void OperatorVoice::ClearAudioOutput() { fAudioOutput = NULL; }
+bool OperatorVoice::HasAudioOutput() const { return fAudioOutput != NULL; }
+bool OperatorVoice::HasEnvelopes() const
+{
+    for (int32 i = 0; i < CountOperators(); i++)
+        if (dynamic_cast<EnvelopeOperator*>(OperatorAt(i)) != NULL) return true;
+    return false;
+}
+VoiceNote* OperatorVoice::createNote(uint8 note, float frequency, uint8 velocity, bigtime_t time)
+    { return new(std::nothrow) OperatorVoiceNote(this, note, frequency, velocity, time); }
+
+status_t OperatorVoice::Archive(BMessage* into, bool deep) const
+{
+    status_t status = Voice::Archive(into, deep);
+    if (status == B_OK) status = into->AddInt32("operatorVoice:next_id", fNextID);
+    if (status == B_OK) status = into->AddInt32("operatorVoice:note_id", fNoteOperatorID);
+    if (status == B_OK) status = into->AddFloat("operatorVoice:audio_default", fAudioDefault.data.floatValue);
+    if (status == B_OK && fAudioOutput != NULL) {
+        status = into->AddInt32("operatorVoice:audio_id", fAudioOutput->owner->ID());
+        if (status == B_OK) status = into->AddString("operatorVoice:audio_name", fAudioOutput->name);
+    }
+    for (int32 i = 0; status == B_OK && i < CountOperators(); i++) {
+        Operator* op = OperatorAt(i);
+        BMessage opArchive;
+        status = op->Archive(&opArchive, deep);
+        if (status == B_OK) status = into->AddMessage("operatorVoice:operator", &opArchive);
+        for (int32 j = 0; status == B_OK && j < op->InputCount(); j++) {
+            OperatorInput* input = op->InputAt(j);
+            if (input->source == NULL) continue;
+            BMessage link;
+            status = link.AddInt32("source_id", input->source->owner->ID());
+            if (status == B_OK) status = link.AddString("source_output", input->source->name);
+            if (status == B_OK) status = link.AddInt32("target_id", op->ID());
+            if (status == B_OK) status = link.AddString("target_input", input->name);
+            if (status == B_OK) status = into->AddMessage("operatorVoice:connection", &link);
         }
     }
-    return op->InputDefault(input);
+    return status;
 }
 
-OperatorValue
-OperatorVoice::_OutputValue(OperatorVoiceNote& note, const Operator* op, int32 output)
+status_t OperatorVoice::_Unarchive(const BMessage* archive)
 {
-    return op->EvaluateOutput(output, note,
-        *note.fStates[_IndexForID(IDForOperator(op))]);
+    archive->FindInt32("operatorVoice:next_id", &fNextID);
+    archive->FindInt32("operatorVoice:note_id", &fNoteOperatorID);
+    archive->FindFloat("operatorVoice:audio_default", &fAudioDefault.data.floatValue);
+    BMessage opArchive;
+    for (int32 i = 0; archive->FindMessage("operatorVoice:operator", i, &opArchive) == B_OK; i++) {
+        const char* type;
+        if (opArchive.FindString("operator:type", &type) != B_OK) continue;
+        Operator* op = InstantiateOperator(type, &opArchive);
+        if (op == NULL) continue;
+        op->Unarchive(&opArchive);
+        int32 id = op->ID();
+        if (id < 0 || FindOperator(id) != NULL || !fOperators.AddItem(op)) { delete op; continue; }
+        if (id >= fNextID) fNextID = id + 1;
+    }
+    _RefreshGraphIndices();
+    BMessage link;
+    for (int32 i = 0; archive->FindMessage("operatorVoice:connection", i, &link) == B_OK; i++) {
+        int32 sourceID, targetID; const char *outputName, *inputName;
+        if (link.FindInt32("source_id", &sourceID) == B_OK
+            && link.FindString("source_output", &outputName) == B_OK
+            && link.FindInt32("target_id", &targetID) == B_OK
+            && link.FindString("target_input", &inputName) == B_OK)
+            Connect(sourceID, outputName, targetID, inputName);
+    }
+    int32 audioID; const char* audioName;
+    if (archive->FindInt32("operatorVoice:audio_id", &audioID) == B_OK
+        && archive->FindString("operatorVoice:audio_name", &audioName) == B_OK)
+        SetAudioOutput(audioID, audioName);
+    if (FindOperator(fNoteOperatorID) == NULL) {
+        fNoteOperatorID = -1;
+        for (int32 i = 0; i < CountOperators(); i++)
+            if (dynamic_cast<NoteOperator*>(OperatorAt(i)) != NULL) fNoteOperatorID = OperatorAt(i)->ID();
+        if (fNoteOperatorID < 0) fNoteOperatorID = AddOperator(new(std::nothrow) NoteOperator);
+    }
+    return B_OK;
 }
-
-void
-OperatorVoice::_DispatchNoteOff(OperatorVoiceNote& note, uint64 frame)
+BArchivable* OperatorVoice::Instantiate(BMessage* archive)
 {
-    for (size_t i = 0; i < fConnections.size(); i++) {
-        const Connection& connection = fConnections[i];
-        if (connection.sourceID != fNoteOperatorID || connection.sourceOutput != 2)
-            continue;
-        Operator* target = FindOperator(connection.targetID);
-        int32 index = _IndexForID(connection.targetID);
-        if (target != NULL && index >= 0)
-            target->ReceiveEvent(connection.targetInput, note, *note.fStates[index], frame);
+    if (archive == NULL || !validate_instantiation(archive, "OperatorVoice")) return NULL;
+    return new(std::nothrow) OperatorVoice(archive);
+}
+void OperatorVoice::_SendNoteOff(OperatorVoiceNote& note, uint64 frame)
+{
+    Operator* noteOperator = FindOperator(fNoteOperatorID);
+    OperatorOutput* event = noteOperator != NULL ? noteOperator->FindOutput("NoteOff") : NULL;
+    if (event == NULL) return;
+    for (int32 i = 0; i < event->eventTargets.CountItems(); i++) {
+        OperatorInput* input = event->eventTargets.ItemAt(i);
+        Operator* target = FindOperator(input->source != NULL ? input->source->owner->ID() : -1);
+        if (target == NULL) continue;
+        OperatorState* state = note.fStates.ItemAt(target->fGraphIndex);
+        if (state != NULL) target->ReceiveEvent(input, note, *state, frame);
     }
 }
 
 OperatorVoiceNote::OperatorVoiceNote(OperatorVoice* voice, uint8 note, float frequency,
-    uint8 velocity, bigtime_t performanceTime)
-    :
-    VoiceNote(voice, note, frequency, velocity, performanceTime),
-    fGraph(voice),
-    fFrame(0)
+    uint8 velocity, bigtime_t time)
+    : VoiceNote(voice, note, frequency, velocity, time), fGraph(voice), fFrame(0), fStates(), fCache()
 {
+    int32 outputCount = 0;
     for (int32 i = 0; i < voice->CountOperators(); i++) {
         Operator* op = voice->OperatorAt(i);
-        fStates.push_back(op->CreateState());
-        fCache.push_back(std::vector<CachedOutput>(op->OutputCount()));
+        OperatorState* state = op->CreateState();
+        if (state == NULL || !fStates.AddItem(state)) { delete state; break; }
+        outputCount += op->OutputCount();
+    }
+    for (int32 i = 0; i < outputCount; i++) {
+        OperatorVoiceNote::OutputCache* cache = new(std::nothrow) OutputCache;
+        if (cache == NULL || !fCache.AddItem(cache)) { delete cache; break; }
     }
 }
-
 uint64 OperatorVoiceNote::Frame() const { return fFrame; }
-float OperatorVoiceNote::SampleRate() const { return fSampleRate; }
 float OperatorVoiceNote::NoteFrequency() const { return fFrequency; }
 float OperatorVoiceNote::NoteVelocity() const { return fVelocity; }
-OperatorVoice* OperatorVoiceNote::Graph() const { return fGraph; }
-
-OperatorValue OperatorVoiceNote::InputValue(const Operator* op, int32 input)
-    { return fGraph->_InputValue(*this, op, input); }
-
-OperatorValue
-OperatorVoiceNote::OutputValue(const Operator* op, int32 output)
+OperatorValue OperatorVoiceNote::InputValue(const Operator* op, const char* name)
 {
-    int32 index = fGraph->_IndexForID(fGraph->IDForOperator(op));
-    if (index < 0 || output < 0 || output >= op->OutputCount())
-        return OperatorValue::Float(0.0f);
-    CachedOutput& cache = fCache[index][output];
-    if (cache.frame == fFrame && (cache.valid || cache.evaluating))
-        return cache.value;
-    cache.frame = fFrame;
-    cache.evaluating = true;
-    cache.valid = false;
-    cache.value = op->EvaluateOutput(output, *this, *fStates[index]);
-    cache.evaluating = false;
-    cache.valid = true;
-    return cache.value;
+    OperatorInput* input = op != NULL ? op->FindInput(name) : NULL;
+    if (input == NULL) return OperatorValue::Float(0.0f);
+    if (input->type == OperatorValue::EVENT_VALUE) return OperatorValue::Event();
+    if (input->source != NULL) return Pull(input->source);
+    OperatorValue value = input->defaultValue;
+    if (value.type == OperatorValue::TIME_VALUE)
+        value.data.timeValue = TimeToFrames(value.data.timeValue, fSampleRate);
+    return value;
 }
-
-void
-OperatorVoiceNote::NoteOff(bigtime_t eventTime)
+OperatorValue OperatorVoiceNote::Pull(OperatorOutput* output)
+{
+    if (output == NULL || output->cacheIndex < 0 || output->cacheIndex >= fCache.CountItems())
+        return OperatorValue::Float(0.0f);
+    OutputCache* cache = fCache.ItemAt(output->cacheIndex);
+    if (cache->frame == fFrame && (cache->valid || cache->evaluating)) return cache->value;
+    Operator* owner = output->owner;
+    if (owner == NULL || owner->fGraphIndex < 0 || owner->fGraphIndex >= fStates.CountItems())
+        return OperatorValue::Float(0.0f);
+    cache->frame = fFrame; cache->evaluating = true; cache->valid = false;
+    cache->value = output->function(owner, output->cacheIndex, *this, *fStates.ItemAt(owner->fGraphIndex));
+    cache->evaluating = false; cache->valid = true;
+    return cache->value;
+}
+void OperatorVoiceNote::NoteOff(bigtime_t eventTime)
 {
     VoiceNote::NoteOff(eventTime);
-    fGraph->_DispatchNoteOff(*this, fFrame);
-    if (!fGraph->HasEnvelopes())
-        Recycle();
+    fGraph->_SendNoteOff(*this, fFrame);
+    if (!fGraph->HasEnvelopes()) Recycle();
 }
-
-float
-OperatorVoiceNote::NextSample()
+float OperatorVoiceNote::NextSample()
 {
-    if (fState == RELEASE && !fGraph->HasEnvelopes()) {
-        Recycle();
-        return 0.0f;
-    }
+    if (fStates.CountItems() != fGraph->CountOperators()) { Recycle(); return 0.0f; }
     float sample = fGraph->fAudioDefault.data.floatValue;
-    if (fGraph->HasAudioOutput()) {
-        Operator* source = fGraph->FindOperator(fGraph->fAudioSourceID);
-        if (source != NULL)
-            sample = OutputValue(source, fGraph->fAudioSourceOutput).data.floatValue;
-    }
+    if (fGraph->fAudioOutput != NULL) sample = Pull(fGraph->fAudioOutput).data.floatValue;
+    bool allFinished = true;
     if (fState == RELEASE && fGraph->HasEnvelopes()) {
-        bool allFinished = true;
         for (int32 i = 0; i < fGraph->CountOperators(); i++) {
             EnvelopeOperator* envelope = dynamic_cast<EnvelopeOperator*>(fGraph->OperatorAt(i));
-            if (envelope != NULL && !envelope->IsFinished(*fStates[i])) {
-                // Evaluate even if the envelope is not connected to the audio output.
-                OutputValue(envelope, 0);
-                if (!envelope->IsFinished(*fStates[i])) allFinished = false;
+            if (envelope != NULL) {
+                Pull(envelope->FindOutput("Amplitude"));
+                if (!envelope->IsFinished(*fStates.ItemAt(i))) allFinished = false;
             }
         }
-        if (allFinished) {
-            Recycle();
-            return 0.0f;
-        }
+        if (allFinished) { Recycle(); return 0.0f; }
     }
     fFrame++;
     return sample;
