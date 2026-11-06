@@ -1,5 +1,5 @@
 /*
- * Copyright 2024, My Name
+ * Copyright 2024, Fishpond
  * All rights reserved. Distributed under the terms of the MIT license.
  */
 #ifndef DEBUG_H

@@ -1,5 +1,5 @@
 /*
- * Copyright 2026, YourName
+ * Copyright 2026, Fishpond
  * All rights reserved. Distributed under the terms of the MIT license.
  */
 #ifndef SINENOTE_H

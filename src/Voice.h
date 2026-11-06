@@ -1,5 +1,5 @@
 /*
- * Copyright 2026, YourName
+ * Copyright 2026, Fishpond
  * All rights reserved. Distributed under the terms of the MIT license.
  */
 #ifndef VOICE_H
@@ -85,6 +85,7 @@ public:
                                     uint8 velocity, bigtime_t performanceTime);
     virtual                 ~VoiceNote();
     virtual void            Recycle();
+    virtual float           SampleRate();
     virtual void            SetSampleRate(float sampleRate);
     virtual float           NextSample() = 0;
     virtual void            NoteOff(bigtime_t performanceTime);

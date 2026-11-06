@@ -154,6 +154,7 @@ public:
 typedef NoiseOperator NoiceOperator;
 
 class OperatorVoiceNote : public VoiceNote {
+friend class        OperatorVoice;
 public:
     OperatorVoiceNote(OperatorVoice* voice, uint8 note, float frequency,
         uint8 velocity, bigtime_t performanceTime);

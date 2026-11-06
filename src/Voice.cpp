@@ -1,5 +1,5 @@
 /*
- * Copyright 2026, YourName
+ * Copyright 2026, Fishpond
  * All rights reserved. Distributed under the terms of the MIT license.
  */
 
@@ -37,6 +37,10 @@ VoiceNote::VoiceNote(Voice* voice, uint8 note, float frequency,
     fNoteOnTime(performanceTime)
 {
     SetSampleRate(voice->fSampleRate);
+}
+float
+VoiceNote::SampleRate() {
+    return fSampleRate;
 }
 
 void VoiceNote::SetSampleRate(float sampleRate) {
