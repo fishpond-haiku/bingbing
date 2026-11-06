@@ -6,6 +6,7 @@
 #define VOICE_H
 
 
+#include <Archivable.h>
 #include <SupportDefs.h>
 #include <ObjectList.h>
 #include <View.h>
@@ -112,6 +113,7 @@ class Voice : public BArchivable {
 public:
                             Voice(float SampleRate);
     virtual                 ~Voice();
+    virtual status_t        Archive(BMessage* into, bool deep = true) const override;
     virtual VoiceNote*      NoteOn(uint8 note, float frequency, uint8 velocity, bigtime_t performanceTime);
     virtual bool            NoteOff(uint8 note, bigtime_t performanceTime);
     virtual void            Recycle(VoiceNote* voiceNote);
@@ -121,13 +123,12 @@ public:
     virtual BView*          CreateParamView();
     virtual const char*     Name() = 0;
 protected:
+                            Voice(BMessage* archive);
     virtual VoiceNote*      createNote(uint8 note, float frequency, uint8 velocity, bigtime_t performanceTime) = 0;
     float                   fSampleRate;
     VoiceNotes              fVoiceNotes;
     VoiceParams             fParams;
 };
-
-
 
 
 #endif // VOICE_H

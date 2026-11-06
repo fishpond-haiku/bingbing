@@ -4,12 +4,13 @@
  */
 
 #include <math.h>
+#include <Message.h>
 #include "SineVoice.h"
 
 
-SineVoice::SineVoice(float dT)
+SineVoice::SineVoice(float sampleRate)
     :
-    Voice(dT),
+    Voice(sampleRate),
     fModPhaseParam(new VoiceParam("Modulator Rate", VoiceParam::FLOAT_TYPE, VoiceParam::DISPLAY_KNOB, 3.5F, 0.1F, 20.0F)),
     fModInfluenceParam(new VoiceParam("Modulator Influence", VoiceParam::FLOAT_TYPE, VoiceParam::DISPLAY_KNOB, 0.3F, 0.0F, 2.0F))
 {
@@ -17,12 +18,44 @@ SineVoice::SineVoice(float dT)
     fParams.AddItem(fModInfluenceParam);
 }
 
+SineVoice::SineVoice(BMessage* archive)
+    :
+    Voice(archive),
+    fModPhaseParam(new VoiceParam("Modulator Rate", VoiceParam::FLOAT_TYPE, VoiceParam::DISPLAY_KNOB, 3.5F, 0.1F, 20.0F)),
+    fModInfluenceParam(new VoiceParam("Modulator Influence", VoiceParam::FLOAT_TYPE, VoiceParam::DISPLAY_KNOB, 0.3F, 0.0F, 2.0F))
+{
+    fParams.AddItem(fModPhaseParam);
+    fParams.AddItem(fModInfluenceParam);
+
+    archive->FindFloat("sine:modulator_rate", &fModPhaseParam->value.floatValue);
+    archive->FindFloat("sine:modulator_influence", &fModInfluenceParam->value.floatValue);
+}
+
+status_t
+SineVoice::Archive(BMessage* into, bool deep) const {
+    status_t status = Voice::Archive(into, deep);
+    if (status != B_OK)
+        return status;
+
+    status = into->AddFloat("sine:modulator_rate", fModPhaseParam->value.floatValue);
+    if (status != B_OK)
+        return status;
+
+    return into->AddFloat("sine:modulator_influence", fModInfluenceParam->value.floatValue);
+}
+
+BArchivable*
+SineVoice::Instantiate(BMessage* archive) {
+    if (!validate_instantiation(archive, "SineVoice"))
+        return NULL;
+
+    return new SineVoice(archive);
+}
 
 VoiceNote*
 SineVoice::createNote(uint8 note, float frequency, uint8 velocity, bigtime_t performanceTime) {
     return new SineVoiceNote(this, note, frequency, velocity, performanceTime);
 }
-
 
 SineVoiceNote::SineVoiceNote(SineVoice* voice, uint8 note, float frequency, uint8 velocity, bigtime_t eventTime)
     :
@@ -35,10 +68,9 @@ SineVoiceNote::SineVoiceNote(SineVoice* voice, uint8 note, float frequency, uint
     fRelease(1.0/20000.0)
 { }
 
-
 float
 SineVoiceNote::NextSample() {
-    fModPhase += fdPhase * fModPhaseParam->value.floatValue;;
+    fModPhase += fdPhase * fModPhaseParam->value.floatValue;
     fPhase += fdPhase * (1.0 + fModInfluenceParam->value.floatValue * sin(fModPhase));
     while (fPhase > 2.0 * M_PI)
         fPhase -= 2.0 * M_PI;
@@ -53,4 +85,3 @@ SineVoiceNote::NextSample() {
 
     return sin(fPhase) * fVelocity;
 }
-

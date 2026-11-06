@@ -57,13 +57,26 @@ VoiceNote::~VoiceNote() { }
 
 Voice::Voice(float sampleRate)
     :
+    BArchivable(),
     fSampleRate(sampleRate),
+    fVoiceNotes()
+{ }
+
+Voice::Voice(BMessage* archive)
+    :
+    BArchivable(archive),
+    fSampleRate(0.0F),
     fVoiceNotes()
 { }
 
 Voice::~Voice() {
     fVoiceNotes.MakeEmpty();
     fParams.MakeEmpty();
+}
+
+status_t
+Voice::Archive(BMessage* into, bool deep) const {
+    return BArchivable::Archive(into, deep);
 }
 
 VoiceNote*

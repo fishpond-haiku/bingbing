@@ -9,7 +9,6 @@
 #include <SupportDefs.h>
 #include "Voice.h"
 
-//class SineVoiceNote;
 class SineVoice;
 
 class SineVoiceNote : public VoiceNote {
@@ -31,6 +30,9 @@ class SineVoice : public Voice {
     friend class                SineVoiceNote;
 public:
                                 SineVoice(float sampleRate);
+                                SineVoice(BMessage* archive);
+    virtual status_t            Archive(BMessage* into, bool deep = true) const override;
+    static BArchivable*         Instantiate(BMessage* archive);
 protected:
     virtual VoiceNote*          createNote(uint8 note, float frequency, uint8 velocity, bigtime_t performanceTime) override;
     virtual const char*         Name() override { return "Modulated Sine"; }
